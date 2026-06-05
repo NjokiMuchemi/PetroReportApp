@@ -915,6 +915,12 @@ def format_for_display(df: pd.DataFrame) -> pd.DataFrame:
 
 
 st.set_page_config(page_title="Petro Oil Management Report Generator", layout="wide")
+st.markdown("""
+<div style='text-align:center;padding:10px;'>
+    <h1>⛽ FUEL MANAGEMENT REPORTING SYSTEM</h1>
+    <h4>Sales • Banking • Losses • Maintenance • Management Intelligence</h4>
+</div>
+""", unsafe_allow_html=True)
 st.title("Petro Oil Management Report Generator")
 st.caption("Upload daily sales and maintenance workbooks to generate management reports and intervention dashboards.")
 
@@ -1126,3 +1132,11 @@ if "reports" in st.session_state:
 
     excel_bytes = to_excel_bytes(st.session_state["reports"])
     st.download_button("Download Excel Management Report", data=excel_bytes, file_name="petro_management_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.markdown("""
+<hr>
+<div style='text-align:center; font-size:12px; color:gray;'>
+<b>Developed by Nebkona Investors Ltd</b><br>
+Technologies Division<br>
+Email: njokire@gmail.com
+</div>
+""", unsafe_allow_html=True)
