@@ -962,7 +962,7 @@ st.markdown("""
     <h4>Sales • Banking • Losses • Maintenance • Management Intelligence</h4>
 </div>
 """, unsafe_allow_html=True)
-st.success(f"Welcome {username}")
+st.success("Welcome Administrator")
 col1, col2 = st.columns([8,1])
 with col2:
     if st.button("Logout"):
