@@ -10,6 +10,44 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+# =========================
+# LOGIN CONFIGURATION
+# =========================
+
+USERS = {
+    "admin": "Fuel@2026"
+}
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+def login_screen():
+    st.markdown("""
+    <div style='text-align:center;padding:20px;'>
+        <h1>⛽ FUEL MANAGEMENT REPORTING SYSTEM</h1>
+        <h4>Sales • Banking • Losses • Maintenance • Management Intelligence</h4>
+    </div>
+    """, unsafe_allow_html=True)
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        if USERS.get(username) == password:
+            st.session_state.logged_in = True
+            st.rerun()
+        else:
+            st.error("Invalid username or password")
+
+    st.markdown("""
+    <hr>
+    <div style='text-align:center; font-size:12px; color:gray;'>
+    <b>Developed by Nebkona Investors Ltd</b><br>
+    Technologies Division<br>
+    Email: njokire@gmail.com
+    </div>
+    """, unsafe_allow_html=True)
+
 PRODUCT_MAP = {
     "PMS": "PMS", "ULP": "PMS", "UNLEADED": "PMS", "RMS": "PMS", "PETROL": "PMS", "PMS.": "PMS",
     "AGO": "AGO", "DIESEL": "AGO", "DSL": "AGO", "AUTOMOTIVE GAS OIL": "AGO",
@@ -915,12 +953,21 @@ def format_for_display(df: pd.DataFrame) -> pd.DataFrame:
 
 
 st.set_page_config(page_title="Petro Oil Management Report Generator", layout="wide")
+if not st.session_state.logged_in:
+    login_screen()
+    st.stop()
 st.markdown("""
 <div style='text-align:center;padding:10px;'>
     <h1>⛽ FUEL MANAGEMENT REPORTING SYSTEM</h1>
     <h4>Sales • Banking • Losses • Maintenance • Management Intelligence</h4>
 </div>
 """, unsafe_allow_html=True)
+col1, col2 = st.columns([8,1])
+
+with col2:
+    if st.button("Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
 st.title("Petro Oil Management Report Generator")
 st.caption("Upload daily sales and maintenance workbooks to generate management reports and intervention dashboards.")
 
