@@ -952,7 +952,7 @@ def format_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-st.set_page_config(page_title="Petro Oil Management Report Generator", layout="wide")
+st.set_page_config(page_title="Management Intelligence Dashboard", layout="wide")
 if not st.session_state.logged_in:
     login_screen()
     st.stop()
@@ -962,14 +962,15 @@ st.markdown("""
     <h4>Sales • Banking • Losses • Maintenance • Management Intelligence</h4>
 </div>
 """, unsafe_allow_html=True)
+st.success("Welcome Administrator")
 col1, col2 = st.columns([8,1])
 
 with col2:
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.rerun()
-st.title("Petro Oil Management Report Generator")
-st.caption("Upload daily sales and maintenance workbooks to generate management reports and intervention dashboards.")
+st.title("Management Intelligence Dashboard")
+st.caption("Upload sales and maintenance data to generate executive reports, intervention analysis, performance monitoring and operational intelligence.")
 
 with st.sidebar:
     st.header("Upload Daily Zone Files")
