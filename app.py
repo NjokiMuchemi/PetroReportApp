@@ -562,6 +562,19 @@ def build_reports(sales_df, loss_df, banking_df, targets_df):
     else:
         perf["Target"] = 0.0
     perf["Target"] = pd.to_numeric(perf["Target"], errors="coerce").fillna(0.0)
+    # Special business rule:
+    # Ngara records accumulated bulk sales, so its individual day sales may not appear daily.
+    # For MTD target apportionment, Ngara should use the same Days Counted as Waiyaki.
+    waiyaki_days = perf.loc[
+        perf["Station"].apply(norm_station) == "Waiyaki",
+        "Days Counted"
+    ]
+
+    if not waiyaki_days.empty:
+        perf.loc[
+            perf["Station"].apply(norm_station) == "Ngara",
+            "Days Counted"
+        ] = waiyaki_days.iloc[0]
     perf["Days in Month"] = days_in_month
     perf["Expected MTD Target"] = perf.apply(
         lambda r: r["Target"] * (r["Days Counted"] / days_in_month) if days_in_month else 0,
