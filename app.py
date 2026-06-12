@@ -2,6 +2,7 @@ import io
 import re
 from pathlib import Path
 from datetime import datetime, date
+import calendar
 from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
@@ -9,44 +10,6 @@ import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-
-# =========================
-# LOGIN CONFIGURATION
-# =========================
-
-USERS = {
-    "admin": "Fuel@2026"
-}
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-def login_screen():
-    st.markdown("""
-    <div style='text-align:center;padding:20px;'>
-        <h1>⛽ FUEL MANAGEMENT REPORTING SYSTEM</h1>
-        <h4>Sales • Banking • Losses • Maintenance • Management Intelligence</h4>
-    </div>
-    """, unsafe_allow_html=True)
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-        if USERS.get(username) == password:
-            st.session_state.logged_in = True
-            st.rerun()
-        else:
-            st.error("Invalid username or password")
-
-    st.markdown("""
-    <hr>
-    <div style='text-align:center; font-size:12px; color:gray;'>
-    <b>Developed by Nebkona Investors Ltd</b><br>
-    Technologies Division<br>
-    Email: njokire@gmail.com
-    </div>
-    """, unsafe_allow_html=True)
 
 PRODUCT_MAP = {
     "PMS": "PMS", "ULP": "PMS", "UNLEADED": "PMS", "RMS": "PMS", "PETROL": "PMS", "PMS.": "PMS",
@@ -97,12 +60,22 @@ def is_date_like(x):
 
 
 def to_date(x):
+    if x is None:
+        return None
+    try:
+        if pd.isna(x):
+            return None
+    except Exception:
+        pass
     if isinstance(x, datetime):
         return x.date()
     if isinstance(x, date):
         return x
     try:
-        return pd.to_datetime(x).date()
+        parsed = pd.to_datetime(x, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
     except Exception:
         return None
 
@@ -420,9 +393,128 @@ def apply_station_master_to_df(df: pd.DataFrame, station_master: pd.DataFrame, s
     return out, unmapped
 
 
+
+def build_sales_movement_analysis(sales_df: pd.DataFrame) -> pd.DataFrame:
+    """Compare latest available day with previous available day from the uploaded workbook."""
+    if sales_df is None or sales_df.empty:
+        return pd.DataFrame(columns=["Zone", "Station", "Previous Date", "Latest Date", "Previous Day Sales", "Latest Day Sales", "Daily Movement", "% Daily Change", "Previous MTD Sales", "Current MTD Sales", "Status"])
+    df = sales_df.copy()
+    df["Date"] = df["Date"].apply(to_date)
+    dates = sorted([d for d in df["Date"].dropna().unique()])
+    if len(dates) < 2:
+        return pd.DataFrame(columns=["Zone", "Station", "Previous Date", "Latest Date", "Previous Day Sales", "Latest Day Sales", "Daily Movement", "% Daily Change", "Previous MTD Sales", "Current MTD Sales", "Status"])
+    previous_date, latest_date = dates[-2], dates[-1]
+
+    daily = df.groupby(["Zone", "Station", "Date"], as_index=False).agg(Day_Sales=("Sales", "sum"))
+    prev_day = daily[daily["Date"] == previous_date].rename(columns={"Day_Sales": "Previous Day Sales"})[["Zone", "Station", "Previous Day Sales"]]
+    latest_day = daily[daily["Date"] == latest_date].rename(columns={"Day_Sales": "Latest Day Sales"})[["Zone", "Station", "Latest Day Sales"]]
+    current_mtd = df[df["Date"] <= latest_date].groupby(["Zone", "Station"], as_index=False).agg(Current_MTD_Sales=("Sales", "sum"))
+    previous_mtd = df[df["Date"] <= previous_date].groupby(["Zone", "Station"], as_index=False).agg(Previous_MTD_Sales=("Sales", "sum"))
+
+    out = current_mtd.merge(previous_mtd, on=["Zone", "Station"], how="outer")
+    out = out.merge(prev_day, on=["Zone", "Station"], how="left").merge(latest_day, on=["Zone", "Station"], how="left")
+    for c in ["Previous_MTD_Sales", "Current_MTD_Sales", "Previous Day Sales", "Latest Day Sales"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
+    out["Daily Movement"] = out["Latest Day Sales"] - out["Previous Day Sales"]
+    out["% Daily Change"] = out.apply(lambda r: r["Daily Movement"] / r["Previous Day Sales"] if r["Previous Day Sales"] else 0, axis=1)
+    out["Previous Date"] = previous_date
+    out["Latest Date"] = latest_date
+    out["Status"] = out["Daily Movement"].apply(lambda x: "Growing" if x > 0 else ("Declining" if x < 0 else "No Change"))
+    out = out.rename(columns={"Previous_MTD_Sales": "Previous MTD Sales", "Current_MTD_Sales": "Current MTD Sales"})
+    return out[["Zone", "Station", "Previous Date", "Latest Date", "Previous Day Sales", "Latest Day Sales", "Daily Movement", "% Daily Change", "Previous MTD Sales", "Current MTD Sales", "Status"]].sort_values("Daily Movement")
+
+
+def build_loss_movement_analysis(sales_df: pd.DataFrame, loss_df: pd.DataFrame) -> pd.DataFrame:
+    """Compare latest day loss rate with previous available day loss rate."""
+    cols = ["Zone", "Station", "Previous Date", "Latest Date", "Previous Day Loss", "Latest Day Loss", "Previous Loss %", "Latest Loss %", "Loss % Movement", "Status"]
+    if sales_df is None or sales_df.empty or loss_df is None or loss_df.empty:
+        return pd.DataFrame(columns=cols)
+    s = sales_df.copy(); l = loss_df.copy()
+    s["Date"] = s["Date"].apply(to_date); l["Date"] = l["Date"].apply(to_date)
+    dates = sorted([d for d in s["Date"].dropna().unique()])
+    if len(dates) < 2:
+        return pd.DataFrame(columns=cols)
+    previous_date, latest_date = dates[-2], dates[-1]
+
+    day_sales = s.groupby(["Zone", "Station", "Date"], as_index=False).agg(Day_Sales=("Sales", "sum"))
+    day_loss = l.groupby(["Zone", "Station", "Date"], as_index=False).agg(Day_Loss=("Loss", "sum"))
+    day = day_sales.merge(day_loss, on=["Zone", "Station", "Date"], how="left")
+    day["Day_Loss"] = pd.to_numeric(day["Day_Loss"], errors="coerce").fillna(0.0)
+    day["Loss %"] = day.apply(lambda r: r["Day_Loss"] / r["Day_Sales"] if r["Day_Sales"] else 0, axis=1)
+
+    prev = day[day["Date"] == previous_date].rename(columns={"Day_Loss": "Previous Day Loss", "Loss %": "Previous Loss %"})[["Zone", "Station", "Previous Day Loss", "Previous Loss %"]]
+    latest = day[day["Date"] == latest_date].rename(columns={"Day_Loss": "Latest Day Loss", "Loss %": "Latest Loss %"})[["Zone", "Station", "Latest Day Loss", "Latest Loss %"]]
+    out = latest.merge(prev, on=["Zone", "Station"], how="outer")
+    for c in ["Previous Day Loss", "Latest Day Loss", "Previous Loss %", "Latest Loss %"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
+    out["Loss % Movement"] = out["Latest Loss %"] - out["Previous Loss %"]
+    out["Status"] = out["Loss % Movement"].apply(lambda x: "Improved" if x > 0 else ("Deteriorated" if x < 0 else "No Change"))
+    out["Previous Date"] = previous_date
+    out["Latest Date"] = latest_date
+    return out[cols].sort_values("Loss % Movement")
+
+
+def build_executive_dashboard(network: pd.DataFrame, perf: pd.DataFrame, sales_movement: pd.DataFrame, loss_movement: pd.DataFrame, sales_intervention: pd.DataFrame, loss_intervention: pd.DataFrame) -> pd.DataFrame:
+    k = network.iloc[0] if network is not None and not network.empty else pd.Series(dtype="object")
+    def safe_num(x):
+        try:
+            if pd.isna(x):
+                return 0
+            return float(x)
+        except Exception:
+            return 0
+    rows = [
+        {"KPI": "Network Sales MTD", "Value": safe_num(k.get("Total Sales", 0))},
+        {"KPI": "Expected MTD Target", "Value": safe_num(k.get("Expected MTD Target", 0))},
+        {"KPI": "True Achievement %", "Value": safe_num(k.get("% Achievement", 0))},
+        {"KPI": "Variance vs Expected Target", "Value": safe_num(k.get("MTD Target Variance", 0))},
+        {"KPI": "Network Loss %", "Value": safe_num(k.get("% Loss to Sales", 0))},
+        {"KPI": "Stations Above Expected Target", "Value": int((perf["% Achievement"] >= 1).sum()) if perf is not None and not perf.empty else 0},
+        {"KPI": "Stations Below 85% Expected Target", "Value": int(len(sales_intervention)) if sales_intervention is not None else 0},
+        {"KPI": "Growing Stations", "Value": int((sales_movement["Status"] == "Growing").sum()) if sales_movement is not None and not sales_movement.empty else 0},
+        {"KPI": "Declining Stations", "Value": int((sales_movement["Status"] == "Declining").sum()) if sales_movement is not None and not sales_movement.empty else 0},
+        {"KPI": "Loss Improving Stations", "Value": int((loss_movement["Status"] == "Improved").sum()) if loss_movement is not None and not loss_movement.empty else 0},
+        {"KPI": "Loss Deteriorating Stations", "Value": int((loss_movement["Status"] == "Deteriorated").sum()) if loss_movement is not None and not loss_movement.empty else 0},
+        {"KPI": "Loss Intervention Stations", "Value": int(len(loss_intervention)) if loss_intervention is not None else 0},
+    ]
+    return pd.DataFrame(rows)
+
 def build_reports(sales_df, loss_df, banking_df, targets_df):
-    # MTD Sales
-    sales_pivot = pd.pivot_table(sales_df, values="Sales", index=["Zone", "Station"], columns="Product", aggfunc="sum", fill_value=0).reset_index()
+    """Build FMRS sales, loss, banking and management-intelligence reports.
+
+    V4 adds:
+    - Expected MTD Target = Month Target x Days Counted / Days in Month
+    - True Achievement = Total Sales / Expected MTD Target
+    - Sales movement using latest available date vs previous available date in the uploaded workbooks
+    - Loss movement using latest available date vs previous available date in the uploaded workbooks
+    """
+    sales_df = sales_df.copy() if sales_df is not None else pd.DataFrame()
+    loss_df = loss_df.copy() if loss_df is not None else pd.DataFrame()
+    banking_df = banking_df.copy() if banking_df is not None else pd.DataFrame()
+    targets_df = targets_df.copy() if targets_df is not None else pd.DataFrame(columns=["Station", "Target"])
+
+    if sales_df.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty, empty, empty, empty, empty, empty, empty
+
+    sales_df["Date"] = sales_df["Date"].apply(to_date)
+    if not loss_df.empty:
+        loss_df["Date"] = loss_df["Date"].apply(to_date)
+    if not banking_df.empty:
+        banking_df["Date"] = banking_df["Date"].apply(to_date)
+
+    latest_date = max([d for d in sales_df["Date"].dropna().unique()])
+    days_in_month = calendar.monthrange(latest_date.year, latest_date.month)[1]
+
+    # MTD Sales by station/product
+    sales_pivot = pd.pivot_table(
+        sales_df,
+        values="Sales",
+        index=["Zone", "Station"],
+        columns="Product",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
     for p in PRODUCT_ORDER:
         if p not in sales_pivot.columns:
             sales_pivot[p] = 0.0
@@ -431,10 +523,21 @@ def build_reports(sales_df, loss_df, banking_df, targets_df):
 
     days = sales_df.groupby(["Zone", "Station"])["Date"].nunique().reset_index(name="Days Counted")
     perf = sales_pivot.merge(days, on=["Zone", "Station"], how="left")
+    perf["Days Counted"] = pd.to_numeric(perf["Days Counted"], errors="coerce").fillna(0).astype(int)
     perf["Average Sales/Day"] = perf.apply(lambda r: r["Total Sales"] / r["Days Counted"] if r["Days Counted"] else 0, axis=1)
 
-    # Loss
-    loss_pivot = pd.pivot_table(loss_df, values="Loss", index=["Zone", "Station"], columns="Product", aggfunc="sum", fill_value=0).reset_index()
+    # Losses by station/product
+    if not loss_df.empty:
+        loss_pivot = pd.pivot_table(
+            loss_df,
+            values="Loss",
+            index=["Zone", "Station"],
+            columns="Product",
+            aggfunc="sum",
+            fill_value=0,
+        ).reset_index()
+    else:
+        loss_pivot = pd.DataFrame(columns=["Zone", "Station"])
     for p in PRODUCT_ORDER:
         if p not in loss_pivot.columns:
             loss_pivot[p] = 0.0
@@ -443,42 +546,68 @@ def build_reports(sales_df, loss_df, banking_df, targets_df):
     for c in ["Loss PMS", "Loss AGO", "Loss IK"]:
         if c not in perf.columns:
             perf[c] = 0.0
-        perf[c] = perf[c].fillna(0.0)
+        perf[c] = pd.to_numeric(perf[c], errors="coerce").fillna(0.0)
     perf["Total Loss"] = perf[["Loss PMS", "Loss AGO", "Loss IK"]].sum(axis=1)
     perf["% Loss to Sales"] = perf.apply(lambda r: r["Total Loss"] / r["Total Sales"] if r["Total Sales"] else 0, axis=1)
     perf["% PMS Loss"] = perf.apply(lambda r: r["Loss PMS"] / r["PMS"] if r["PMS"] else 0, axis=1)
     perf["% AGO Loss"] = perf.apply(lambda r: r["Loss AGO"] / r["AGO"] if r["AGO"] else 0, axis=1)
     perf["% IK Loss"] = perf.apply(lambda r: r["Loss IK"] / r["IK"] if r["IK"] else 0, axis=1)
 
+    # Targets and true MTD achievement
     if not targets_df.empty:
+        targets_df = targets_df[["Station", "Target"]].copy()
+        targets_df["Station"] = targets_df["Station"].apply(norm_station)
+        targets_df["Target"] = pd.to_numeric(targets_df["Target"], errors="coerce").fillna(0.0)
         perf = perf.merge(targets_df, on="Station", how="left")
     else:
         perf["Target"] = 0.0
-    perf["Target"] = perf["Target"].fillna(0.0)
-    perf["% Achievement"] = perf.apply(lambda r: r["Total Sales"] / r["Target"] if r["Target"] else 0, axis=1)
+    perf["Target"] = pd.to_numeric(perf["Target"], errors="coerce").fillna(0.0)
+    perf["Days in Month"] = days_in_month
+    perf["Expected MTD Target"] = perf.apply(
+        lambda r: r["Target"] * (r["Days Counted"] / days_in_month) if days_in_month else 0,
+        axis=1,
+    )
+    perf["MTD Target Variance"] = perf["Total Sales"] - perf["Expected MTD Target"]
+    perf["% Monthly Achievement"] = perf.apply(lambda r: r["Total Sales"] / r["Target"] if r["Target"] else 0, axis=1)
+    perf["% Achievement"] = perf.apply(
+        lambda r: r["Total Sales"] / r["Expected MTD Target"] if r["Expected MTD Target"] else 0,
+        axis=1,
+    )
 
     perf = perf.rename(columns={"PMS": "Sales PMS", "AGO": "Sales AGO", "IK": "Sales IK", "Target": "Month Target"})
-    perf = perf[["Zone", "Station", "Sales PMS", "Sales AGO", "Sales IK", "Total Sales", "Days Counted", "Average Sales/Day",
-                 "Loss PMS", "Loss AGO", "Loss IK", "Total Loss", "% Loss to Sales", "% PMS Loss", "% AGO Loss", "% IK Loss", "Month Target", "% Achievement"]]
-    perf = perf.sort_values(["Zone", "Station"])
+    perf = perf[[
+        "Zone", "Station", "Sales PMS", "Sales AGO", "Sales IK", "Total Sales",
+        "Days Counted", "Days in Month", "Average Sales/Day", "Month Target",
+        "Expected MTD Target", "MTD Target Variance", "% Achievement", "% Monthly Achievement",
+        "Loss PMS", "Loss AGO", "Loss IK", "Total Loss", "% Loss to Sales",
+        "% PMS Loss", "% AGO Loss", "% IK Loss",
+    ]].sort_values(["Zone", "Station"])
 
-    network = perf.agg({"Sales PMS": "sum", "Sales AGO": "sum", "Sales IK": "sum", "Total Sales": "sum", "Total Loss": "sum", "Month Target": "sum"}).to_frame().T
+    network = perf.agg({
+        "Sales PMS": "sum", "Sales AGO": "sum", "Sales IK": "sum", "Total Sales": "sum",
+        "Total Loss": "sum", "Month Target": "sum", "Expected MTD Target": "sum",
+        "MTD Target Variance": "sum",
+    }).to_frame().T
+    network["Days Counted"] = int(perf["Days Counted"].max()) if not perf.empty else 0
+    network["Days in Month"] = days_in_month
     network["% Loss to Sales"] = network["Total Loss"] / network["Total Sales"].replace(0, pd.NA)
-    network["% Achievement"] = network["Total Sales"] / network["Month Target"].replace(0, pd.NA)
+    network["% Achievement"] = network["Total Sales"] / network["Expected MTD Target"].replace(0, pd.NA)
+    network["% Monthly Achievement"] = network["Total Sales"] / network["Month Target"].replace(0, pd.NA)
 
-    banking_summary = banking_df.groupby(["Zone", "Station"], as_index=False).agg(Banking_MTD=("Banking", "sum"), Banking_Days=("Date", "nunique")) if not banking_df.empty else pd.DataFrame(columns=["Zone", "Station", "Banking_MTD", "Banking_Days"])
+    # Banking summary
+    banking_summary = banking_df.groupby(["Zone", "Station"], as_index=False).agg(
+        Banking_MTD=("Banking", "sum"),
+        Banking_Days=("Date", "nunique"),
+    ) if not banking_df.empty else pd.DataFrame(columns=["Zone", "Station", "Banking_MTD", "Banking_Days"])
     if not banking_summary.empty:
         banking_summary["Avg Daily Banking"] = banking_summary["Banking_MTD"] / banking_summary["Banking_Days"].replace(0, pd.NA)
         banking_summary = banking_summary.merge(perf[["Zone", "Station", "Total Sales"]], on=["Zone", "Station"], how="left")
         banking_summary["Banking/Sales Ratio"] = banking_summary["Banking_MTD"] / banking_summary["Total Sales"].replace(0, pd.NA)
 
-    # Intervention rules as agreed:
-    # - Sales intervention: station below 85% of monthly target.
-    # - Loss intervention: total loss worse than -0.5% of sales, OR PMS/AGO product loss worse than -0.5%.
-    #   IK is excluded from product-level loss intervention, but still included in total station loss.
+    # Sales intervention now uses true achievement against expected MTD target.
     sales_intervention = perf[perf["% Achievement"] < 0.85].copy().sort_values("% Achievement")
     if not sales_intervention.empty:
-        sales_intervention["Reason"] = "Below 85% of monthly target"
+        sales_intervention["Reason"] = "Below 85% of expected MTD target"
 
     def loss_reason(row):
         reasons = []
@@ -494,7 +623,17 @@ def build_reports(sales_df, loss_df, banking_df, targets_df):
     loss_intervention["Reason"] = loss_intervention.apply(loss_reason, axis=1)
     loss_intervention = loss_intervention[loss_intervention["Reason"] != ""].copy().sort_values("% Loss to Sales")
 
-    return perf, network, banking_summary, sales_intervention, loss_intervention
+    # Target reality analysis
+    target_reality = perf[[
+        "Zone", "Station", "Total Sales", "Days Counted", "Days in Month", "Month Target",
+        "Expected MTD Target", "MTD Target Variance", "% Achievement", "% Monthly Achievement",
+    ]].copy().sort_values("% Achievement")
+
+    sales_movement = build_sales_movement_analysis(sales_df)
+    loss_movement = build_loss_movement_analysis(sales_df, loss_df)
+    executive_dashboard = build_executive_dashboard(network, perf, sales_movement, loss_movement, sales_intervention, loss_intervention)
+
+    return perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard
 
 
 def style_workbook(wb):
@@ -683,102 +822,99 @@ def extract_maintenance_from_workbook(uploaded_file, zone_name: str) -> pd.DataF
     return df
 
 
-
 def classify_maintenance_issue(issue_type, issue, comments):
-    """Classify maintenance using the actual Issue + Comments narrative only.
-
-    The Issue Type column is intentionally ignored because the uploaded templates
-    often contain misleading labels such as FENCE, CIVIL WORKS, SALES, etc.
-    """
-    text = norm_text(" ".join([clean_text(issue), clean_text(comments)]))
-
-    def has_any(words):
-        return any(w in text for w in words)
+    text = norm_text(" ".join([clean_text(issue_type), clean_text(issue), clean_text(comments)]))
 
     product_words = ["PMS", "AGO", "IK", "ULP", "UNLEADED", "RMS", "DIESEL", "KEROSENE", "KERO"]
-    has_product = has_any(product_words)
+    has_product = any(w in text for w in product_words)
 
-    # 1. Automation — card readers, Gold Card, ATG, controllers and automation communication.
-    if has_any([
-        "CARD READER", "CARD READERS", "GOLD CARD", "VEEDER", "ATG", "AUTOMATION",
-        "CONTROLLER", "COMMUNICATION", "POS", "ON MANUAL", "MANUAL CARD", "TAKE CARD"
-    ]):
-        return "Automation", "Critical", "Automation/control risk"
-
-    # 2. Health & Safety — safety, fire, sand buckets, washrooms/toilets, blocked drainage where it creates HSE exposure.
-    if has_any([
+    # 1. Safety & Compliance
+    if any(w in text for w in [
         "SAND BUCKET", "SAND BUCKETS", "FIRE EXTINGUISHER", "EXTINGUISHER",
         "SPILL KIT", "SPILL", "EMERGENCY STOP", "E-STOP", "EARTHING",
-        "SAFETY", "FIRST AID", "FIRE", "WASHROOM", "WASHROOMS", "TOILET BLOCKED",
-        "TOILET CLEANING", "GENTS TOILET", "LADIES TOILET", "NOT CONNECTED TO MAIN SEWER",
-        "SEWER LINE", "BEES", "TINTING/CURTAINS", "TINTING", "CURTAINS", "ENTRANCE MAIN DOOR REQUIRE METALLIC GRILLS"
+        "SAFETY SIGN", "SAFETY SIGNAGE", "FIRST AID", "PUMP GUARD", "PUMP GUARDS",
+        "BOLLARD", "BOLLARDS", "FIRE", "SAFETY"
     ]):
-        return "Health & Safety", "Critical", "Health and safety exposure"
+        return "Safety & Compliance", "Critical", "Safety/compliance exposure"
 
-    # 3. Contamination / product storage water issues.
-    if (has_product and has_any(["WATER TRACE", "WATER TRACES", "FULL OF WATER", "CONTAM", "CONTAMINATION", "CONTAMINATED"])) or has_any([
-        "FULL OF WATER AFTER HEAVY RAINS", "WATER AFTER HEAVY RAINS"
-    ]):
-        return "contamination", "Critical", "Product contamination/water ingress"
-
-    # 4. Electrical, Generator & Power — genset/generator, KPLC/Kenya Power, voltage, phase, sockets, lights.
-    if has_any([
-        "GENSET", "GENERATOR", "ENGINE", "RADIATOR", "BATTERY", "KPLC", "KENYA POWER",
-        "POWER", "VOLTAGE", "LOW VOLTAGE", "HIGH VOLTAGE", "PHASE", "3 PHASE", "3PHASE",
-        "ELECTRIC", "ELECTRICAL", "SOCKET", "DB BOARD", "CIRCUIT BREAKER", "BREAKER",
-        "ATS", "AVR", "STABILIZER", "STABILISER", "INVERTER", "LIGHT", "LIGHTING",
-        "SECURITY LIGHT", "UNDERCANOPY LIGHT", "UNDER CANOPY LIGHT", "CANOPY LIGHT",
-        "FLOOD LIGHT", "BULB", "SWITCH", "HAND DRIER", "NOT LIGHTING", "DIM"
-    ]):
-        return "Electrical, Generator & Power", "Critical", "Electrical/generator/power issue"
-
-    # 5. Compressor maintenance.
-    if has_any(["COMPRESSOR", "AIR GAUGE", "PRESSURE GAUGE", "PRESSURE NOZZLE", "PRESSURE LINE"]):
-        return "compressor maintenance", "Major", "Compressor/air pressure issue"
-
-    # 6. Branding & Appearance — station image, totem, fascia, branding, painting, Petro logo, price display.
-    if has_any([
+    # 2. Branding & Image Management
+    # Canopy is branding/image unless wording clearly refers to lighting or structural collapse/leak.
+    if any(w in text for w in [
         "PAINT", "PAINTING", "REPAINT", "REPAINTING", "BRANDING", "REBRANDING",
-        "TOTEM", "FASCIA", "FACIA", "CLADDING", "SIGN BOARD", "SIGNBOARD", "SIGN BOARDS",
-        "SIGNAGE", "PRICE BOARD", "DISPLAYING PRICES", "DISPLAY", "DIRECTIONAL SIGN",
-        "PETRO LOGO", "LOGO", "CORPORATE IMAGE", "FACELIFT", "UPPER PART DAMAGED",
-        "CRACKED ONE SIDE AT THE BOTTOM", "POWER DISPLAY", "LENS FAULTY", "ROOF SLAP PAINT PEELING"
+        "TOTEM", "FASCIA", "CLADDING", "SIGNBOARD", "SIGN BOARD", "SIGNAGE",
+        "PRICE BOARD", "DIRECTIONAL SIGN", "CORPORATE IMAGE"
     ]):
-        return "Branding & Appearance", "Major", "Branding/appearance issue"
+        return "Branding & Image Management", "Major", "Branding/image issue"
 
-    # 7. Routine Maintenance & Civil Works — civil/facility problems must be checked before pump logic.
-    # This prevents phrases such as 'pump island potholes' from being classified as pump breakdowns.
-    if has_any([
-        "PERIMETER", "WALL", "FENCE", "POTHOLE", "POTHOLES", "PORTHOLES", "PUMP ISLAND",
-        "DRAIN", "DRAINAGE", "CULVERT", "CABRO", "TOILET", "PLUMB", "PLUMBING", "SEPTIC",
-        "SEWER", "DOOR", "WINDOW", "WINDOWS", "ROOF", "SLAB", "MASON", "MASONRY",
-        "STRUCTURE", "ACCESS", "ENTRANCE", "EXIT", "OFFICE", "WELD", "WELDING",
-        "SHADE", "FLOOR", "TILES", "TYPES", "PAVEMENT", "DRIVEWAY", "LEAKING",
-        "LEAKS", "HEAVY DOWNPOUR", "RAINY SEASON", "CANOPY LEAK", "CANOPY LEAKING",
-        "CANOPY IRON", "CANOPY FACIA", "CANOPY FACIA", "FORECOURT METAL COVERS",
-        "FORECOURT DRAINAGE", "MANHOLE", "MAN HOLE", "MANHOLE COVER", "MANHOLE COVERS",
-        "PRODUCT MANHOLES", "HINGES", "HIDGES", "COVER BROKEN", "COVER RAILS", "LOUVRES",
-        "WINDOW PANES", "CONCRETE", "SCREEDING", "FUELING RAMP", "FUELLING RAMP",
-        "PUMP GUARD", "PUMP GUARDS", "BOLLARD", "BOLLARDS", "MOUNT HOOKS", "MOUNTING AT THE FORECOURT"
+    if "CANOPY" in text:
+        if any(w in text for w in ["LIGHT", "LIGHTING", "BULB", "FLOOD"]):
+            return "Generator & Power Systems", "Major", "Canopy lighting/power issue"
+        if any(w in text for w in ["BRAND", "PAINT", "FASCIA", "CLADDING", "IMAGE"]):
+            return "Branding & Image Management", "Major", "Canopy branding/image issue"
+        if any(w in text for w in ["LEAK", "ROOF", "COLLAPSE", "STRUCTURE", "DAMAGE"]):
+            return "Civil & Facility Issues", "Major", "Canopy civil/structural issue"
+        return "Branding & Image Management", "Major", "Canopy branding/image issue"
+
+    # 3. Generator, Power & Lighting
+    if any(w in text for w in [
+        "GENSET", "GENERATOR", "KPLC", "KENYA POWER", "POWER", "VOLTAGE",
+        "LOW VOLTAGE", "HIGH VOLTAGE", "PHASE", "ELECTRIC", "ELECTRICAL",
+        "DB BOARD", "CIRCUIT BREAKER", "BREAKER", "ATS", "AVR", "STABILIZER",
+        "STABILISER", "INVERTER", "LIGHT", "LIGHTING", "FLOOD LIGHT",
+        "FORECOURT LIGHT", "SECURITY LIGHT", "YARD LIGHT", "BULB"
     ]):
-        return "Routine Maintenance & Civil Works", "Major", "Routine maintenance/civil works issue"
+        if any(w in text for w in ["TANK", "LEAK", "LEAKING"]) and any(w in text for w in ["GENSET", "GENERATOR"]):
+            return "Generator & Power Systems", "Critical", "Generator fuel tank leak"
+        if any(w in text for w in ["NOT START", "NOT WORK", "FAULT", "BATTERY", "ATS", "AVR", "PHASE", "VOLTAGE", "OUTAGE", "TRIPPING", "TRIP"]):
+            return "Generator & Power Systems", "Critical", "Generator/power failure"
+        return "Generator & Power Systems", "Major", "Generator/power/lighting issue"
 
-    # 8. Pumps & Dispensers — only actual pump/dispenser breakdowns, not civil works near pumps.
-    if has_any([
-        "PUMP FAULT", "PUMP FAULTY", "PUMP INSTALLED", "PUMP NOZZLE", "PUMP NOZZLES",
-        "SUBMERSIBLE PUMP", "SUBMASSIBLE PUMP", "UNABLE TO PUMP", "UNABLE TO DISPENSE",
-        "NOT DISPENSING", "DISPENSING BUT NOT COUNTING", "DISPENSING SLOWLY", "DISPENSE",
-        "DISPENSING", "NOZZLE", "NOZZLES", "KEYPAD", "METERING UNIT", "METERING",
-        "SOLENOID", "UNDERVALVE", "HOSE", "HOSE LEAKING", "HOSE REPLACEMENT",
-        "MOTOR FAULTY", "NOZZLE BOOT", "OVERDISPENSE", "PMS1", "PMS2", "PMS3", "PMS4",
-        "AGO1", "AGO2", "AGO3", "AGO4", "AGO5", "AGO6", "IK PUMP", "ERROR 20", "ERRO 20",
-        "POWER BOARD FAULTY", "MOTHER BOARD", "BOARD TRANSFERRED", "RUNNING CONTINOUS", "RUNNING CONTINUOUS",
-        "AIRLOCK", "AIRLOCK REMOVAL", "AFTER PRICE CHANGE", "AFTER PICE CHANGE"
+    # 4. Product Storage Facilities
+    if has_product and "TANK" in text and any(w in text for w in ["LEAK", "LEAKING"]):
+        return "Product Storage Facilities", "Critical", "Product tank leak"
+
+    if has_product and "TANK" in text and any(w in text for w in ["WATER", "CONTAM", "CONTAMINAT", "FULL OF WATER"]):
+        return "Product Storage Facilities", "Critical", "Product tank contamination"
+
+    if any(w in text for w in ["MANHOLE", "DIPSTICK", "DIP STICK", "DIPPING", "TANK GAUGE", "OVERFILL"]):
+        return "Product Storage Facilities", "Major", "Product storage/tank facility issue"
+
+    # 5. Product Immobilization
+    if any(w in text for w in ["TRAPPED", "IMMOBIL", "QUARANTINE", "QUARANTINED", "ISOLATED"]):
+        return "Product Immobilization", "Critical", "Product immobilized"
+
+    if has_product and any(w in text for w in ["CANNOT BE SOLD", "CANT BE SOLD", "CAN'T BE SOLD", "STORED DUE", "STUCK"]):
+        return "Product Immobilization", "Critical", "Product cannot be sold"
+
+    # 6. Automation & Forecourt Systems
+    if any(w in text for w in [
+        "CARD READER", "GOLD CARD", "VEEDER", "ATG", "AUTOMATION",
+        "CONTROLLER", "COMMUNICATION", "POS"
     ]):
-        return "Pumps & Dispensers", "Critical", "Pump/dispenser breakdown"
+        return "Automation & Forecourt Systems", "Critical", "Automation/control risk"
 
-    # 9. Other.
-    return "Other", "Major", "Pending maintenance issue"
+    # 7. Dispensing Equipment
+    if any(w in text for w in [
+        "PUMP", "NOZZLE", "DISPENS", "METER", "PRESET", "FLOW",
+        "HOSE", "BOARD", "MANUAL", "SUCTION", "COUNTING"
+    ]):
+        return "Dispensing Equipment", "Critical", "Sales-impact dispensing issue"
+
+    # 8. Compressor & Air Systems
+    if any(w in text for w in ["COMPRESSOR", "AIR GAUGE", "PRESSURE"]):
+        return "Compressor & Air Systems", "Major", "Compressor/air system issue"
+
+    # 9. Civil & Facility Issues
+    if any(w in text for w in [
+        "PERIMETER", "WALL", "FENCE", "POTHOLE", "POTHOLES", "DRAIN",
+        "DRAINAGE", "CULVERT", "TOILET", "PLUMB", "PLUMBING", "SEWER",
+        "DOOR", "WINDOW", "ROOF", "MASON", "MASONRY", "STRUCTURE",
+        "ACCESS", "OFFICE", "WELD", "WELDING", "SHADE", "FLOOR",
+        "TILES", "PAVEMENT", "DRIVEWAY"
+    ]):
+        return "Civil & Facility Issues", "Major", "Facility/civil issue"
+
+    return "Other Maintenance", "Major", "Pending maintenance issue"
 
 
 def build_maintenance_reports(maintenance_df: pd.DataFrame):
@@ -788,86 +924,63 @@ def build_maintenance_reports(maintenance_df: pd.DataFrame):
 
     today = date.today()
     df = maintenance_df.copy()
-
-    # Support both old and new extracted column names.
-    if "Reported By" not in df.columns:
-        if "Reported To" in df.columns:
-            df["Reported By"] = df["Reported To"]
-        else:
-            df["Reported By"] = ""
-    if "Action Person" not in df.columns:
-        df["Action Person"] = ""
-    if "Reported To" not in df.columns:
-        if "Assigned To" in df.columns:
-            df["Reported To"] = df["Assigned To"]
-        else:
-            df["Reported To"] = ""
-
     df["Date Reported"] = df["Date Reported"].apply(to_date)
 
     def calculate_days_open(d):
-        if d is None or pd.isna(d):
+        if pd.isna(d) or d is None:
             return None
         return (today - d).days
 
     df["Days Open"] = df["Date Reported"].apply(calculate_days_open)
-
-    # IMPORTANT: classifier ignores Issue Type and uses Issue + Comments only.
-    classifications = df.apply(
-        lambda r: classify_maintenance_issue(None, r.get("Issue"), r.get("Comments")),
-        axis=1,
-    )
+    classifications = df.apply(lambda r: classify_maintenance_issue(r.get("Issue Type"), r.get("Issue"), r.get("Comments")), axis=1)
     df["Category"] = [x[0] for x in classifications]
-    df["Priority"] = [x[1] for x in classifications]
-    df["Management Reason"] = [x[2] for x in classifications]
 
     action_person_map = {
-        "Pumps & Dispensers": "Vijay",
-        "Automation": "Ochol/ Steve",
-        "Branding & Appearance": "Patel/ Vijay",
-        "compressor maintenance": "Vijay",
-        "Compressor Maintenance": "Vijay",
-        "contamination": "Vijay",
-        "Electrical, Generator & Power": "Vijay",
-        "Health & Safety": "Edward",
-        "Routine Maintenance & Civil Works": "Milan",
-        "Other": "Other",
+        "Dispensing Equipment": "Vijay",
+        "Product Storage Facilities": "Vijay",
+        "Product Immobilization": "Vijay",
+        "Generator & Power Systems": "Vijay",
+        "Branding & Image Management": "Vijay",
+        "Automation & Forecourt Systems": "Ochol / Steve",
+        "Safety & Compliance": "Edward",
+        "Civil & Facility Issues": "Milan",
+        "Compressor & Air Systems": "Vijay",
+        "Other Maintenance": "Vijay",
     }
 
     category_order = {
-        "Pumps & Dispensers": 1,
-        "Automation": 2,
-        "Electrical, Generator & Power": 3,
-        "contamination": 4,
-        "compressor maintenance": 5,
-        "Branding & Appearance": 6,
-        "Health & Safety": 7,
-        "Routine Maintenance & Civil Works": 8,
-        "Other": 9,
+        "Dispensing Equipment": 1,
+        "Product Storage Facilities": 2,
+        "Product Immobilization": 3,
+        "Generator & Power Systems": 4,
+        "Automation & Forecourt Systems": 5,
+        "Safety & Compliance": 6,
+        "Branding & Image Management": 7,
+        "Civil & Facility Issues": 8,
+        "Compressor & Air Systems": 9,
+        "Other Maintenance": 10,
     }
+
     priority_order = {"Critical": 1, "Major": 2, "Minor": 3}
 
-    df["Action Person"] = df["Category"].map(action_person_map).fillna("Other")
-    df["Reported By"] = df["Reported By"].apply(clean_text)
-    df["Reported To"] = df["Reported To"].apply(clean_text).replace("", "Vijay")
+    df["Action Person"] = df["Category"].map(action_person_map).fillna("Vijay")
+    df["Priority"] = [x[1] for x in classifications]
+    df["Management Reason"] = [x[2] for x in classifications]
     df["Issue ID"] = [f"MNT-{today.strftime('%Y%m%d')}-{i+1:03d}" for i in range(len(df))]
     df["_Category Order"] = df["Category"].map(category_order).fillna(99)
     df["_Priority Order"] = df["Priority"].map(priority_order).fillna(99)
 
-    register_columns = [
+    # Keep station-specific detail. Do not consolidate issue wording across stations.
+    register = df[[
         "Issue ID", "Zone", "Station", "Category", "Action Person", "Priority",
         "Issue Type", "Issue", "Date Reported", "Days Open",
-        "Reported By", "Reported To", "Management Reason", "Comments", "Source Sheet",
-        "_Category Order", "_Priority Order",
-    ]
-    for col in register_columns:
-        if col not in df.columns:
-            df[col] = ""
+        "Reported To", "Assigned To", "Management Reason", "Comments", "Source Sheet",
+        "_Category Order", "_Priority Order"
+    ]].copy()
 
-    register = df[register_columns].copy()
     register = register.sort_values(
         ["_Category Order", "_Priority Order", "Days Open", "Zone", "Station"],
-        ascending=[True, True, False, True, True],
+        ascending=[True, True, False, True, True]
     ).drop(columns=["_Category Order", "_Priority Order"])
 
     station_summary = register.groupby(["Zone", "Station"], as_index=False).agg(
@@ -877,7 +990,6 @@ def build_maintenance_reports(maintenance_df: pd.DataFrame):
     ).sort_values(["Critical_Issues", "Open_Issues", "Oldest_Days_Open"], ascending=[False, False, False])
 
     aging = register.copy()
-
     def age_bucket(x):
         if pd.isna(x):
             return "Unknown Date"
@@ -888,7 +1000,6 @@ def build_maintenance_reports(maintenance_df: pd.DataFrame):
         if x <= 180:
             return "91-180 Days"
         return "Above 180 Days"
-
     aging["Age Bucket"] = aging["Days Open"].apply(age_bucket)
     aging_report = aging.groupby("Age Bucket", as_index=False).agg(Issues=("Issue ID", "count"))
 
@@ -897,7 +1008,7 @@ def build_maintenance_reports(maintenance_df: pd.DataFrame):
     critical["_Priority Order"] = critical["Priority"].map(priority_order).fillna(99)
     critical = critical.sort_values(
         ["_Category Order", "_Priority Order", "Days Open", "Zone", "Station"],
-        ascending=[True, True, False, True, True],
+        ascending=[True, True, False, True, True]
     ).drop(columns=["_Category Order", "_Priority Order"])
 
     responsibility = register.groupby("Action Person", as_index=False).agg(
@@ -908,6 +1019,7 @@ def build_maintenance_reports(maintenance_df: pd.DataFrame):
     ).sort_values(["Critical_Issues", "Open_Issues"], ascending=[False, False])
 
     return register, station_summary, aging_report, critical, responsibility
+
 
 def to_maintenance_excel_bytes(maintenance_reports):
     register, station_summary, aging_report, critical, responsibility = maintenance_reports
@@ -922,25 +1034,42 @@ def to_maintenance_excel_bytes(maintenance_reports):
     return output.getvalue()
 
 
+def unpack_reports(reports):
+    """Support both old 5-item reports and V4 9-item reports."""
+    if len(reports) == 5:
+        perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard = unpack_reports(reports)
+        empty = pd.DataFrame()
+        return perf, network, banking_summary, sales_intervention, loss_intervention, empty, empty, empty, empty
+    return reports
+
+
 def to_excel_bytes(reports):
-    perf, network, banking_summary, sales_intervention, loss_intervention = reports
+    perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard = unpack_reports(reports)
     perf_display, banking_display = add_grand_total_rows(perf, banking_summary)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        if executive_dashboard is not None and not executive_dashboard.empty:
+            executive_dashboard.to_excel(writer, sheet_name="Executive Dashboard", index=False)
         network.to_excel(writer, sheet_name="Executive Summary", index=False)
+        if target_reality is not None and not target_reality.empty:
+            target_reality.to_excel(writer, sheet_name="Target Reality", index=False)
+        if sales_movement is not None and not sales_movement.empty:
+            sales_movement.to_excel(writer, sheet_name="Sales Movement", index=False)
+        if loss_movement is not None and not loss_movement.empty:
+            loss_movement.to_excel(writer, sheet_name="Loss Movement", index=False)
         perf_display.to_excel(writer, sheet_name="MTD Performance", index=False)
         banking_display.to_excel(writer, sheet_name="Banking", index=False)
         sales_intervention.to_excel(writer, sheet_name="Sales Intervention", index=False)
         loss_intervention.to_excel(writer, sheet_name="Loss Intervention", index=False)
         style_workbook(writer.book)
         for ws_name in ["MTD Performance", "Banking"]:
-            ws = writer.book[ws_name]
-            last_row = ws.max_row
-            for cell in ws[last_row]:
-                cell.font = Font(bold=True)
-                cell.fill = PatternFill("solid", fgColor="D9EAD3")
+            if ws_name in writer.book.sheetnames:
+                ws = writer.book[ws_name]
+                last_row = ws.max_row
+                for cell in ws[last_row]:
+                    cell.font = Font(bold=True)
+                    cell.fill = PatternFill("solid", fgColor="D9EAD3")
     return output.getvalue()
-
 
 
 def format_for_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -952,22 +1081,15 @@ def format_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-st.set_page_config(page_title="Management Intelligence Dashboard", layout="wide")
-if not st.session_state.logged_in:
-    login_screen()
-    st.stop()
+st.set_page_config(page_title="Fuel Management Reporting System", layout="wide")
+
 st.markdown("""
 <div style='text-align:center;padding:10px;'>
     <h1>⛽ FUEL MANAGEMENT REPORTING SYSTEM</h1>
     <h4>Sales • Banking • Losses • Maintenance • Management Intelligence</h4>
 </div>
 """, unsafe_allow_html=True)
-st.success("Welcome Administrator")
-col1, col2 = st.columns([8,1])
-with col2:
-    if st.button("Logout"):
-        st.session_state.logged_in = False
-        st.rerun()
+
 st.title("Management Intelligence Dashboard")
 st.caption("Upload sales and maintenance data to generate executive reports, intervention analysis, performance monitoring and operational intelligence.")
 
@@ -1082,7 +1204,7 @@ if ready and st.button("Generate Sales/Loss/Banking Reports", type="primary"):
         st.warning("Some station names were not in the approved Station Master and were excluded from the report. Open the Unmapped Stations tab, add aliases to Station Master, save, then regenerate.")
 
     reports = build_reports(sales_df, loss_df, banking_df, targets_df)
-    perf, network, banking_summary, sales_intervention, loss_intervention = reports
+    perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard = unpack_reports(reports)
 
     st.session_state["reports"] = reports
     st.session_state["raw"] = (sales_df, loss_df, banking_df)
@@ -1141,7 +1263,7 @@ if "maintenance_reports" in st.session_state:
     st.download_button("Download Excel Maintenance Report", data=maintenance_excel, file_name="petro_pending_maintenance_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 if "reports" in st.session_state:
-    perf, network, banking_summary, sales_intervention, loss_intervention = st.session_state["reports"]
+    perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard = unpack_reports(st.session_state["reports"])
     perf_display, banking_display = add_grand_total_rows(perf, banking_summary)
     k = network.iloc[0]
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -1149,26 +1271,38 @@ if "reports" in st.session_state:
     c2.metric("PMS", f"{k['Sales PMS']:,.0f} L")
     c3.metric("AGO", f"{k['Sales AGO']:,.0f} L")
     c4.metric("IK", f"{k['Sales IK']:,.0f} L")
-    c5.metric("Achievement", f"{k['% Achievement']:.1%}" if pd.notna(k['% Achievement']) else "N/A")
+    c5.metric("True Achievement", f"{k['% Achievement']:.1%}" if pd.notna(k['% Achievement']) else "N/A")
 
-    tabs = st.tabs(["MTD Performance", "Banking", "Sales Intervention", "Loss Intervention", "Unmapped Stations", "Raw Data"])
+    tabs = st.tabs(["Executive Dashboard", "Target Reality", "Sales Movement", "Loss Movement", "MTD Performance", "Banking", "Sales Intervention", "Loss Intervention", "Unmapped Stations", "Raw Data"])
     with tabs[0]:
-        st.dataframe(format_for_display(perf_display), use_container_width=True, hide_index=True)
+        st.caption("One-page early warning view based on the current uploaded workbooks.")
+        st.dataframe(format_for_display(executive_dashboard), use_container_width=True, hide_index=True)
     with tabs[1]:
-        st.dataframe(format_for_display(banking_display), use_container_width=True, hide_index=True)
+        st.caption("Compares actual MTD sales against apportioned target for the days already counted.")
+        st.dataframe(format_for_display(target_reality), use_container_width=True, hide_index=True)
     with tabs[2]:
-        st.caption("Rule: station appears here when achievement is below 85% of monthly target.")
-        st.dataframe(format_for_display(sales_intervention), use_container_width=True, hide_index=True)
+        st.caption("Compares the latest available day with the previous available day in the uploaded workbooks.")
+        st.dataframe(format_for_display(sales_movement), use_container_width=True, hide_index=True)
     with tabs[3]:
+        st.caption("Shows whether loss percentage improved or deteriorated compared to the previous available day.")
+        st.dataframe(format_for_display(loss_movement), use_container_width=True, hide_index=True)
+    with tabs[4]:
+        st.dataframe(format_for_display(perf_display), use_container_width=True, hide_index=True)
+    with tabs[5]:
+        st.dataframe(format_for_display(banking_display), use_container_width=True, hide_index=True)
+    with tabs[6]:
+        st.caption("Rule: station appears here when true achievement is below 85% of expected MTD target.")
+        st.dataframe(format_for_display(sales_intervention), use_container_width=True, hide_index=True)
+    with tabs[7]:
         st.caption("Rule: station appears here when total loss is worse than -0.5%, or PMS/AGO product loss is worse than -0.5%. IK is excluded from product-level intervention.")
         st.dataframe(format_for_display(loss_intervention), use_container_width=True, hide_index=True)
-    with tabs[4]:
+    with tabs[8]:
         st.subheader("Unmapped Station Names")
         st.caption("These were excluded because they are not approved in Station Master. Add them as aliases, save Station Master, then regenerate reports.")
         unmapped_df = st.session_state.get("unmapped_stations", pd.DataFrame())
         st.dataframe(unmapped_df, use_container_width=True, hide_index=True)
 
-    with tabs[5]:
+    with tabs[9]:
         sales_df, loss_df, banking_df = st.session_state["raw"]
         st.subheader("Extracted Sales")
         st.dataframe(sales_df.head(500), use_container_width=True, hide_index=True)
@@ -1179,11 +1313,3 @@ if "reports" in st.session_state:
 
     excel_bytes = to_excel_bytes(st.session_state["reports"])
     st.download_button("Download Excel Management Report", data=excel_bytes, file_name="petro_management_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.markdown("""
-<hr>
-<div style='text-align:center; font-size:12px; color:gray;'>
-<b>Developed by Nebkona Investors Ltd</b><br>
-Technologies Division<br>
-Email: njokire@gmail.com
-</div>
-""", unsafe_allow_html=True)
