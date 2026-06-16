@@ -1246,14 +1246,62 @@ if maintenance_ready and st.button("Generate Maintenance Dashboard", type="secon
     st.session_state["maintenance_raw"] = maintenance_df
 
 if "maintenance_reports" in st.session_state:
-    register, station_summary, aging_report, critical, responsibility = st.session_state["maintenance_reports"]
-    st.header("Maintenance Intervention Dashboard")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Open Issues", f"{len(register):,.0f}")
-    m2.metric("Critical Issues", f"{(register['Priority'] == 'Critical').sum():,.0f}" if not register.empty else "0")
-    m3.metric("Stations Affected", f"{register['Station'].nunique():,.0f}" if not register.empty else "0")
-    m4.metric("Issues >90 Days", f"{(register['Days Open'].fillna(0) > 90).sum():,.0f}" if not register.empty else "0")
+    (
+        register,
+        station_summary,
+        aging_report,
+        critical,
+        responsibility,
+    ) = st.session_state["maintenance_reports"]
 
+    st.subheader("Filter Maintenance Report Before Download")
+
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+    with filter_col1:
+        selected_categories = st.multiselect(
+            "Category",
+            sorted(register["Category"].dropna().unique()),
+            default=sorted(register["Category"].dropna().unique())
+        )
+
+    with filter_col2:
+        selected_zones = st.multiselect(
+            "Zone",
+            sorted(register["Zone"].dropna().unique()),
+            default=sorted(register["Zone"].dropna().unique())
+        )
+
+    with filter_col3:
+        selected_stations = st.multiselect(
+            "Station",
+            sorted(register["Station"].dropna().unique()),
+            default=sorted(register["Station"].dropna().unique())
+        )
+
+    filtered_register = register[
+        register["Category"].isin(selected_categories)
+        & register["Zone"].isin(selected_zones)
+        & register["Station"].isin(selected_stations)
+    ].copy()
+
+    st.write(f"Showing {len(filtered_register)} issues")
+    st.dataframe(filtered_register, use_container_width=True, hide_index=True)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Open Issues", f"{len(filtered_register):,.0f}")
+    m2.metric(
+        "Critical Issues",
+        f"{(filtered_register['Priority'] == 'Critical').sum():,.0f}" if not filtered_register.empty else "0"
+    )
+    m3.metric(
+        "Stations Affected",
+        f"{filtered_register['Station'].nunique():,.0f}" if not filtered_register.empty else "0"
+    )
+    m4.metric(
+        "Issues >90 Days",
+        f"{(filtered_register['Days Open'].fillna(0) > 90).sum():,.0f}" if not filtered_register.empty else "0"
+    )
     mtabs = st.tabs(["Pending Register", "Critical Issues", "Station Summary", "Aging Analysis", "Action Person Summary", "Unmapped Maintenance"])
     with mtabs[0]:
         st.caption("Station-specific pending maintenance register. Original issue wording is preserved; categories are added only for management prioritization.")
