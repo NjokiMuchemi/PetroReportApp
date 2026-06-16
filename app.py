@@ -857,6 +857,38 @@ def to_maintenance_excel_bytes(maintenance_reports):
     return output.getvalue()
 
 
+
+def to_filtered_maintenance_excel_bytes(filtered_register: pd.DataFrame):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        filtered_register.to_excel(writer, sheet_name="Filtered Issues", index=False)
+
+        if not filtered_register.empty:
+            filtered_station_summary = filtered_register.groupby(["Zone", "Station"], as_index=False).agg(
+                Open_Issues=("Issue ID", "count"),
+                Critical_Issues=("Priority", lambda s: (s == "Critical").sum()),
+                Oldest_Days_Open=("Days Open", "max"),
+            ).sort_values(["Critical_Issues", "Open_Issues", "Oldest_Days_Open"], ascending=[False, False, False])
+        else:
+            filtered_station_summary = pd.DataFrame(columns=["Zone", "Station", "Open_Issues", "Critical_Issues", "Oldest_Days_Open"])
+
+        filtered_station_summary.to_excel(writer, sheet_name="Station Summary", index=False)
+
+        if not filtered_register.empty:
+            filtered_action_summary = filtered_register.groupby("Action Person", as_index=False).agg(
+                Open_Issues=("Issue ID", "count"),
+                Critical_Issues=("Priority", lambda s: (s == "Critical").sum()),
+                Stations_Affected=("Station", "nunique"),
+                Oldest_Days_Open=("Days Open", "max"),
+            ).sort_values(["Critical_Issues", "Open_Issues"], ascending=[False, False])
+        else:
+            filtered_action_summary = pd.DataFrame(columns=["Action Person", "Open_Issues", "Critical_Issues", "Stations_Affected", "Oldest_Days_Open"])
+
+        filtered_action_summary.to_excel(writer, sheet_name="Action Person Summary", index=False)
+        style_workbook(writer.book)
+
+    return output.getvalue()
+
 def to_excel_bytes(reports):
     perf, network, banking_summary, sales_intervention, loss_intervention = reports
     perf_display, banking_display = add_grand_total_rows(perf, banking_summary)
@@ -1032,33 +1064,127 @@ if maintenance_ready and st.button("Generate Maintenance Dashboard", type="secon
 
 if "maintenance_reports" in st.session_state:
     register, station_summary, aging_report, critical, responsibility = st.session_state["maintenance_reports"]
-    st.header("Maintenance Intervention Dashboard")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Open Issues", f"{len(register):,.0f}")
-    m2.metric("Critical Issues", f"{(register['Priority'] == 'Critical').sum():,.0f}" if not register.empty else "0")
-    m3.metric("Stations Affected", f"{register['Station'].nunique():,.0f}" if not register.empty else "0")
-    m4.metric("Issues >90 Days", f"{(register['Days Open'].fillna(0) > 90).sum():,.0f}" if not register.empty else "0")
 
-    mtabs = st.tabs(["Pending Register", "Critical Issues", "Station Summary", "Aging Analysis", "Action Person Summary", "Unmapped Maintenance"])
+    st.header("Maintenance Intervention Dashboard")
+
+    st.subheader("Filter Maintenance Report Before Download")
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+    with filter_col1:
+        selected_categories = st.multiselect(
+            "Category",
+            sorted(register["Category"].dropna().unique()),
+            default=sorted(register["Category"].dropna().unique()),
+            key="maintenance_category_filter",
+        )
+
+    with filter_col2:
+        selected_zones = st.multiselect(
+            "Zone",
+            sorted(register["Zone"].dropna().unique()),
+            default=sorted(register["Zone"].dropna().unique()),
+            key="maintenance_zone_filter",
+        )
+
+    with filter_col3:
+        selected_stations = st.multiselect(
+            "Station",
+            sorted(register["Station"].dropna().unique()),
+            default=sorted(register["Station"].dropna().unique()),
+            key="maintenance_station_filter",
+        )
+
+    filtered_register = register[
+        register["Category"].isin(selected_categories)
+        & register["Zone"].isin(selected_zones)
+        & register["Station"].isin(selected_stations)
+    ].copy()
+
+    st.caption(f"Showing {len(filtered_register):,} of {len(register):,} open maintenance issues based on selected filters.")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Open Issues", f"{len(filtered_register):,.0f}")
+    m2.metric("Critical Issues", f"{(filtered_register['Priority'] == 'Critical').sum():,.0f}" if not filtered_register.empty else "0")
+    m3.metric("Stations Affected", f"{filtered_register['Station'].nunique():,.0f}" if not filtered_register.empty else "0")
+    m4.metric("Issues >90 Days", f"{(filtered_register['Days Open'].fillna(0) > 90).sum():,.0f}" if not filtered_register.empty else "0")
+
+    filtered_station_summary = (
+        filtered_register.groupby(["Zone", "Station"], as_index=False).agg(
+            Open_Issues=("Issue ID", "count"),
+            Critical_Issues=("Priority", lambda s: (s == "Critical").sum()),
+            Oldest_Days_Open=("Days Open", "max"),
+        ).sort_values(["Critical_Issues", "Open_Issues", "Oldest_Days_Open"], ascending=[False, False, False])
+        if not filtered_register.empty
+        else pd.DataFrame(columns=["Zone", "Station", "Open_Issues", "Critical_Issues", "Oldest_Days_Open"])
+    )
+
+    filtered_critical = filtered_register[
+        (filtered_register["Priority"] == "Critical")
+        | (filtered_register["Days Open"].fillna(0) > 90)
+    ].copy()
+
+    filtered_action_summary = (
+        filtered_register.groupby("Action Person", as_index=False).agg(
+            Open_Issues=("Issue ID", "count"),
+            Critical_Issues=("Priority", lambda s: (s == "Critical").sum()),
+            Stations_Affected=("Station", "nunique"),
+            Oldest_Days_Open=("Days Open", "max"),
+        ).sort_values(["Critical_Issues", "Open_Issues"], ascending=[False, False])
+        if not filtered_register.empty
+        else pd.DataFrame(columns=["Action Person", "Open_Issues", "Critical_Issues", "Stations_Affected", "Oldest_Days_Open"])
+    )
+
+    mtabs = st.tabs([
+        "Filtered Register",
+        "Filtered Critical",
+        "Filtered Station Summary",
+        "Filtered Action Person Summary",
+        "Full Pending Register",
+        "Aging Analysis",
+        "Unmapped Maintenance",
+    ])
+
     with mtabs[0]:
-        st.caption("Station-specific pending maintenance register. Original issue wording is preserved; categories are added only for management prioritization.")
-        st.dataframe(register, use_container_width=True, hide_index=True)
+        st.caption("Filtered station-specific pending maintenance register.")
+        st.dataframe(filtered_register, use_container_width=True, hide_index=True)
+
     with mtabs[1]:
-        st.caption("Includes sales-impact issues, product storage risks, product immobilization, automation risks and any issue older than 90 days.")
-        st.dataframe(critical, use_container_width=True, hide_index=True)
+        st.caption("Filtered critical issues and issues older than 90 days.")
+        st.dataframe(filtered_critical, use_container_width=True, hide_index=True)
+
     with mtabs[2]:
-        st.dataframe(station_summary, use_container_width=True, hide_index=True)
+        st.dataframe(filtered_station_summary, use_container_width=True, hide_index=True)
+
     with mtabs[3]:
-        st.dataframe(aging_report, use_container_width=True, hide_index=True)
+        st.dataframe(filtered_action_summary, use_container_width=True, hide_index=True)
+
     with mtabs[4]:
-        st.dataframe(responsibility, use_container_width=True, hide_index=True)
+        st.caption("Full unfiltered pending maintenance register.")
+        st.dataframe(register, use_container_width=True, hide_index=True)
+
     with mtabs[5]:
+        st.dataframe(aging_report, use_container_width=True, hide_index=True)
+
+    with mtabs[6]:
         unmapped_maintenance = st.session_state.get("unmapped_maintenance", pd.DataFrame())
         st.caption("These were excluded because they are not approved in Station Master. Add them as aliases and regenerate.")
         st.dataframe(unmapped_maintenance, use_container_width=True, hide_index=True)
 
+    filtered_maintenance_excel = to_filtered_maintenance_excel_bytes(filtered_register)
+    st.download_button(
+        "Download Filtered Maintenance Report",
+        data=filtered_maintenance_excel,
+        file_name="filtered_maintenance_report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
     maintenance_excel = to_maintenance_excel_bytes(st.session_state["maintenance_reports"])
-    st.download_button("Download Excel Maintenance Report", data=maintenance_excel, file_name="petro_pending_maintenance_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "Download Full Excel Maintenance Report",
+        data=maintenance_excel,
+        file_name="petro_pending_maintenance_report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 if "reports" in st.session_state:
     perf, network, banking_summary, sales_intervention, loss_intervention = st.session_state["reports"]
