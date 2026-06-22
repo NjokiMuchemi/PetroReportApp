@@ -1154,6 +1154,10 @@ def format_for_display(df: pd.DataFrame) -> pd.DataFrame:
 
 st.set_page_config(page_title="Fuel Management Reporting System", layout="wide")
 
+if not st.session_state.logged_in:
+    login_screen()
+    st.stop()
+
 st.markdown("""
 <div style='text-align:center;padding:10px;'>
     <h1>⛽ FUEL MANAGEMENT REPORTING SYSTEM</h1>
