@@ -63,6 +63,31 @@ def clean_text(x):
     return str(x).strip()
 
 
+def safe_float(x):
+    """Convert Excel cell values to float safely.
+    Text markers such as 's', blanks, dashes and notes are treated as 0.
+    """
+    if x is None:
+        return 0.0
+    try:
+        if pd.isna(x):
+            return 0.0
+    except Exception:
+        pass
+    if isinstance(x, str):
+        s = x.strip().replace(",", "")
+        if s == "" or s.lower() in ["s", "-", "n/a", "na", "nil", "none"]:
+            return 0.0
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+
 def norm_text(x):
     return re.sub(r"\s+", " ", clean_text(x).upper())
 
@@ -168,14 +193,14 @@ def extract_product_summary(wb, zone_name: str) -> pd.DataFrame:
         for sales_col, (station, receipt_col) in station_by_col.items():
             if not station or is_total_station(station):
                 continue
-            receipts = ws.cell(row, receipt_col).value or 0
-            sales = ws.cell(row, sales_col).value or 0
+            receipts = safe_float(ws.cell(row, receipt_col).value)
+            sales = safe_float(ws.cell(row, sales_col).value)
             if receipts == 0 and sales == 0:
                 # keep rows only when some value exists; blank station/day rows add noise
                 continue
             records.append({
                 "Zone": zone_name, "Date": dt, "Station": station, "Product": product,
-                "Receipts": float(receipts or 0), "Sales": float(sales or 0)
+                "Receipts": receipts, "Sales": sales
             })
     return pd.DataFrame(records)
 
@@ -205,12 +230,10 @@ def extract_product_loss(wb, zone_name: str) -> pd.DataFrame:
         for col, station in loss_cols.items():
             if not station or is_total_station(station):
                 continue
-            loss = ws.cell(row, col).value or 0
-            if isinstance(loss, str):
-                continue
+            loss = safe_float(ws.cell(row, col).value)
             if loss == 0:
                 continue
-            records.append({"Zone": zone_name, "Date": dt, "Station": station, "Product": product, "Loss": float(loss or 0)})
+            records.append({"Zone": zone_name, "Date": dt, "Station": station, "Product": product, "Loss": loss})
     return pd.DataFrame(records)
 
 
@@ -250,12 +273,10 @@ def extract_banking(wb, zone_name: str) -> pd.DataFrame:
         if not dt:
             continue
         for col, station in station_cols:
-            val = ws.cell(row, col).value or 0
-            if isinstance(val, str):
-                continue
+            val = safe_float(ws.cell(row, col).value)
             if val == 0:
                 continue
-            records.append({"Zone": zone_name, "Date": dt, "Station": station, "Banking": float(val or 0)})
+            records.append({"Zone": zone_name, "Date": dt, "Station": station, "Banking": val})
     return pd.DataFrame(records)
 
 
