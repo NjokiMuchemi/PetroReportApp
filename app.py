@@ -98,12 +98,22 @@ def is_date_like(x):
 
 
 def to_date(x):
+    if x is None:
+        return None
+    try:
+        if pd.isna(x):
+            return None
+    except Exception:
+        pass
     if isinstance(x, datetime):
         return x.date()
     if isinstance(x, date):
         return x
     try:
-        return pd.to_datetime(x).date()
+        parsed = pd.to_datetime(x, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
     except Exception:
         return None
 
@@ -1107,10 +1117,15 @@ def to_maintenance_excel_bytes(maintenance_reports):
 
 def unpack_reports(reports):
     """Support both old 5-item reports and V4 9-item reports."""
+    if reports is None:
+        empty = pd.DataFrame()
+        return empty, empty, empty, empty, empty, empty, empty, empty, empty
+
     if len(reports) == 5:
-        perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard = unpack_reports(reports)
+        perf, network, banking_summary, sales_intervention, loss_intervention = reports
         empty = pd.DataFrame()
         return perf, network, banking_summary, sales_intervention, loss_intervention, empty, empty, empty, empty
+
     return reports
 
 
@@ -1284,12 +1299,23 @@ if ready and st.button("Generate Sales/Loss/Banking Reports", type="primary"):
 
     if not unmapped_df.empty:
         st.warning("Some station names were not in the approved Station Master and were excluded from the report. Open the Unmapped Stations tab, add aliases to Station Master, save, then regenerate.")
+        with st.expander("View Unmapped Sales/Banking/Loss Stations", expanded=True):
+            st.dataframe(unmapped_df, use_container_width=True, hide_index=True)
 
-    reports = build_reports(sales_df, loss_df, banking_df, targets_df)
-    perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard = unpack_reports(reports)
+    if sales_df.empty:
+        st.error(
+            "No mapped sales data was generated. This usually means the uploaded workbook station names "
+            "do not match the approved Station Master. Add the missing aliases in Station Master, save, "
+            "then regenerate the report."
+        )
+        st.session_state.pop("reports", None)
+        st.session_state["raw"] = (sales_df, loss_df, banking_df)
+    else:
+        reports = build_reports(sales_df, loss_df, banking_df, targets_df)
+        perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard = unpack_reports(reports)
 
-    st.session_state["reports"] = reports
-    st.session_state["raw"] = (sales_df, loss_df, banking_df)
+        st.session_state["reports"] = reports
+        st.session_state["raw"] = (sales_df, loss_df, banking_df)
 
 
 if maintenance_ready and st.button("Generate Maintenance Dashboard", type="secondary"):
@@ -1440,6 +1466,18 @@ if "maintenance_reports" in st.session_state:
 
 if "reports" in st.session_state:
     perf, network, banking_summary, sales_intervention, loss_intervention, target_reality, sales_movement, loss_movement, executive_dashboard = unpack_reports(st.session_state["reports"])
+
+    if perf.empty or network.empty:
+        st.error(
+            "The sales report could not be displayed because no mapped sales data was generated. "
+            "Please check the Unmapped Stations table and update Station Master aliases."
+        )
+        unmapped_df = st.session_state.get("unmapped_stations", pd.DataFrame())
+        if not unmapped_df.empty:
+            st.subheader("Unmapped Station Names")
+            st.dataframe(unmapped_df, use_container_width=True, hide_index=True)
+        st.stop()
+
     perf_display, banking_display = add_grand_total_rows(perf, banking_summary)
     k = network.iloc[0]
     c1, c2, c3, c4, c5 = st.columns(5)
